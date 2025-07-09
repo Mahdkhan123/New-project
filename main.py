@@ -73,8 +73,8 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(desc, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Buttons
-        timetable_btn = QPushButton("Open Timetable")
-        datesheet_btn = QPushButton("Open Datesheet")
+        timetable_btn = QPushButton("Open Timetable Generator")
+        datesheet_btn = QPushButton("Open Datesheet Generator")
         timetable_btn.setFixedSize(220, 60)
         datesheet_btn.setFixedSize(220, 60)
         timetable_btn.setStyleSheet("""
