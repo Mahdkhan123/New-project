@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QPushButton, QTabWidget, QInputDialog, QCheckBox, QTableWidgetItem, QComboBox)
+                             QLabel, QPushButton, QTabWidget, QInputDialog, QCheckBox, QTableWidgetItem, QComboBox, QLineEdit)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QColor
 
@@ -22,6 +22,20 @@ class TimetableWindow(QWidget):
         # Header
         header = self.create_header()
         main_layout.addWidget(header)
+
+        # --- Add search bar ---
+        search_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search by Teacher Name...")
+        self.search_bar.setFixedWidth(220)  # Make the search bar small
+        search_label = QLabel("Search:")
+        search_label.setFixedWidth(50)
+        search_layout.addWidget(search_label)
+        search_layout.addWidget(self.search_bar)
+        search_layout.addStretch()  # Push search bar to the left
+        self.search_bar.textChanged.connect(self.filter_by_teacher_name)
+        main_layout.addLayout(search_layout)
+        # --- End search bar ---
 
         # Tab widget for semester frames
         self.tab_widget = QTabWidget()
@@ -929,6 +943,40 @@ class TimetableWindow(QWidget):
         if not table:
             return
         table.setRowCount(0)
+
+    def filter_by_teacher_name(self, text):
+        text = text.strip().lower()
+        any_match = False
+        first_matching_tab = None
+
+        for tab_index in range(self.tab_widget.count()):
+            tab_widget = self.tab_widget.widget(tab_index)
+            if not hasattr(tab_widget, "table"):
+                continue
+            table = tab_widget.table
+            tab_has_match = False
+            for row in range(table.rowCount()):
+                item = table.item(row, 6)  # Teacher Name column
+                if not text:
+                    table.setRowHidden(row, False)
+                    tab_has_match = True  # Show all if search is empty
+                elif item and text in item.text().lower():
+                    table.setRowHidden(row, False)
+                    tab_has_match = True
+                else:
+                    table.setRowHidden(row, True)
+            if tab_has_match and first_matching_tab is None and text:
+                first_matching_tab = tab_index
+                any_match = True
+
+        # Switch to the first tab with a match (if any and search is not empty)
+        if text and first_matching_tab is not None:
+            self.tab_widget.setCurrentIndex(first_matching_tab)
+        # Optionally, show a message if no matches found
+        # elif text and not any_match:
+        #     from PyQt6.QtWidgets import QMessageBox
+        #     QMessageBox.information(self, "No Results", "No entries found for this teacher name.")
+
 
 def run_timetable_generation(
     shift, lectures_per_course, lecture_duration, start_time,
