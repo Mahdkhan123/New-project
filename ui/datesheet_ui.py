@@ -1,14 +1,17 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTabWidget, QInputDialog,
     QTableWidget, QTableWidgetItem, QComboBox, QCheckBox, QHeaderView, QDialog, QLineEdit,
-    QDateEdit, QTimeEdit, QScrollArea
+    QDateEdit, QTimeEdit, QScrollArea, QFileDialog
 )
 from PyQt6.QtCore import Qt, QDate, QTime
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QTextDocument
+from PyQt6.QtPrintSupport import QPrinter
 import os
 import sqlite3
 from PyQt6.QtWidgets import QInputDialog, QMessageBox
 from algorithm.datesheet_ga import DatesheetGeneticAlgorithm
+import pandas as pd
+from datetime import datetime
 
 class DatesheetWindow(QWidget):
     def __init__(self, back_callback=None):
@@ -538,6 +541,11 @@ class DatesheetWindow(QWidget):
             preview_dialog.resize(900, 600)
             vbox = QVBoxLayout(preview_dialog)
 
+            # Store the data for export functions
+            preview_dialog.metadata = metadata
+            preview_dialog.schedule = schedule
+            preview_dialog.exam_time_range = f"{exam_start_time} - {exam_end_time}"
+
             # Metadata
             vbox.addWidget(QLabel(f"<b>{metadata['college_name']}</b>"))
             vbox.addWidget(QLabel(metadata['datesheet_title']))
@@ -590,6 +598,64 @@ class DatesheetWindow(QWidget):
                 tab_layout.addWidget(table)
                 tab_widget.addTab(tab, f"{date_str} ({day_name})")
             vbox.addWidget(tab_widget)
+
+            # Add export buttons
+            export_layout = QHBoxLayout()
+            export_to_pdf = QPushButton("Export to PDF")
+            export_to_excel = QPushButton("Export to Excel")
+            
+            # Updated button styling
+            button_style = """
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    min-width: 150px;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+                QPushButton:pressed {
+                    background-color: #3d8b40;
+                }
+            """
+            
+            excel_button_style = button_style.replace("#4CAF50", "#2196F3").replace("#45a049", "#1976D2").replace("#3d8b40", "#1565C0")
+            
+            export_to_pdf.setStyleSheet(button_style)
+            export_to_excel.setStyleSheet(excel_button_style)
+            
+            export_layout.addWidget(export_to_pdf)
+            export_layout.addSpacing(10)  # Add spacing between buttons
+            export_layout.addWidget(export_to_excel)
+            export_layout.addStretch()  # Push buttons to the left
+            vbox.addLayout(export_layout)
+
+            def export_pdf():
+                file_name, _ = QFileDialog.getSaveFileName(
+                    preview_dialog,
+                    "Export PDF",
+                    f"datesheet_{datetime.datetime.now().strftime('%Y%m%d')}.pdf",
+                    "PDF Files (*.pdf)"
+                )
+                if file_name:
+                    generate_pdf(file_name, preview_dialog.metadata, preview_dialog.schedule, preview_dialog.exam_time_range)
+
+            def export_excel():
+                file_name, _ = QFileDialog.getSaveFileName(
+                    preview_dialog,
+                    "Export Excel",
+                    f"datesheet_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx",
+                    "Excel Files (*.xlsx)"
+                )
+                if file_name:
+                    generate_excel(file_name, preview_dialog.metadata, preview_dialog.schedule, preview_dialog.exam_time_range)
+
+            export_to_pdf.clicked.connect(export_pdf)
+            export_to_excel.clicked.connect(export_excel)
 
             close_btn = QPushButton("Close")
             close_btn.clicked.connect(preview_dialog.accept)
@@ -654,3 +720,153 @@ class DatesheetWindow(QWidget):
 
         generate_btn.clicked.connect(on_generate)
         dialog.exec()
+
+def generate_pdf(file_name, metadata, schedule, exam_time_range):
+    doc = QTextDocument()
+    
+    # HTML content for the PDF, updated to match the reference PDF's style and structure
+    html = f"""
+    <html>
+    <head>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+            }}
+            .header {{
+                text-align: center;
+                margin-bottom: 20px;
+            }}
+            .header h1 {{
+                font-size: 14pt;
+                font-weight: bold;
+                margin: 0;
+            }}
+            .header h2 {{
+                font-size: 12pt;
+                font-weight: normal;
+                margin: 5px 0 0;
+            }}
+            .header p {{
+                font-size: 10pt;
+                margin: 0;
+            }}
+            table {{ 
+                width: 100%; 
+                border-collapse: collapse; 
+            }}
+            th, td {{ 
+                border: 1px solid black; 
+                padding: 8px; 
+                text-align: center; 
+                vertical-align: top;
+            }}
+            th {{ 
+                background-color: #f0f0f0; 
+                font-weight: bold;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>{metadata['college_name']}</h1>
+            <h2>{metadata['datesheet_title']}</h2>
+            <p>Effective Date: {metadata['effective_date']}</p>
+            <p>Department: {metadata['department_name']}</p>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date & Day</th>
+                    <th>Semester/Section</th>
+                    <th>Subject (Code)</th>
+                    <th>Time</th>
+                    <th>Room</th>
+                    <th>Invigilator</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    
+    # Sort exams by date for correct table order
+    for exam in sorted(schedule, key=lambda x: x.get('date', '')):
+        # Format the 'Date & Day' column
+        try:
+            date_obj = datetime.strptime(exam.get('date', ''), "%Y-%m-%d")
+            date_day_str = f"{date_obj.strftime('%d-%m-%Y')}<br>{date_obj.strftime('%A')}"
+        except ValueError:
+            date_day_str = f"{exam.get('date', '')}<br>N/A"
+
+        # Format the 'Semester/Section' column
+        semester_section_str = f"{exam.get('semester', '')}<br>{exam.get('class_section', '')}"
+
+        # Format the 'Subject (Code)' column
+        subject_code_str = f"{exam.get('subject', '')}<br>- {exam.get('course_code', '')}"
+
+        html += f"""
+            <tr>
+                <td>{date_day_str}</td>
+                <td>{semester_section_str}</td>
+                <td>{subject_code_str}</td>
+                <td>{exam_time_range}</td>
+                <td>{exam.get('room', '')}</td>
+                <td>{exam.get('teacher', '')}</td>
+            </tr>
+        """
+    
+    html += """
+            </tbody>
+        </table>
+    </body>
+    </html>
+    """
+    
+    doc.setHtml(html)
+    printer = QPrinter()
+    printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+    printer.setOutputFileName(file_name)
+    doc.print(printer)
+
+def generate_excel(file_name, metadata, schedule, exam_time_range):
+    # Create DataFrame
+    data = []
+    for exam in schedule:
+        day_name = datetime.strptime(exam.get('date', ''), "%Y-%m-%d").strftime("%A")
+        data.append({
+            'Semester': exam.get('semester', ''),
+            'Subject': exam.get('subject', ''),
+            'Course Code': exam.get('course_code', ''),
+            'Class Section': exam.get('class_section', ''),
+            'Day': day_name,
+            'Date': exam.get('date', ''),
+            'Time': exam_time_range,
+            'Room': exam.get('room', ''),
+            'Shift': exam.get('shift', ''),
+            'Teacher': exam.get('teacher', '')
+        })
+    
+    df = pd.DataFrame(data)
+    
+    # Create Excel writer object
+    with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
+        # Write metadata
+        metadata_df = pd.DataFrame([
+            ['College Name', metadata['college_name']],
+            ['Title', metadata['datesheet_title']],
+            ['Effective Date', metadata['effective_date']],
+            ['Department', metadata['department_name']]
+        ])
+        metadata_df.to_excel(writer, sheet_name='Datesheet', index=False, header=False, startrow=0)
+        
+        # Write datesheet data
+        df.to_excel(writer, sheet_name='Datesheet', index=False, startrow=6)
+        
+        # Auto-adjust columns width
+        worksheet = writer.sheets['Datesheet']
+        for idx, col in enumerate(df.columns):
+            max_length = max(
+                df[col].astype(str).apply(len).max(),
+                len(col)
+            )
+            worksheet.column_dimensions[chr(65 + idx)].width = max_length + 2
