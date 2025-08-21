@@ -212,7 +212,7 @@ class TimetableWindow(QWidget):
             QComboBox {
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                padding: 6px;
+                padding: 6px 22px 6px 6px; /* leave room on the right for native arrow */
                 font-size: 12px;
                 background-color: white;
             }
@@ -220,18 +220,16 @@ class TimetableWindow(QWidget):
                 border-color: #2196F3;
             }
             QComboBox::drop-down {
-                border: none;
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 15px;
-                border-left-width: 1px;
-                border-left-color: darkgray;
-                border-left-style: solid;
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
+                width: 20px;
+                border: none;
+                background: transparent;
             }
             QComboBox::down-arrow {
-                 border: none;
+                /* do not hide native arrow; allow default rendering */
+                width: 12px;
+                height: 12px;
             }
         """
 

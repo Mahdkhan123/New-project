@@ -204,7 +204,7 @@ class DatesheetWindow(QWidget):
             QComboBox {
                 border: 1px solid #ddd;
                 border-radius: 4px;
-                padding: 6px;
+                padding: 6px 22px 6px 6px; /* leave room on the right for native arrow */
                 font-size: 12px;
                 background-color: white;
             }
@@ -212,18 +212,16 @@ class DatesheetWindow(QWidget):
                 border-color: #2196F3;
             }
             QComboBox::drop-down {
-                border: none;
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 15px;
-                border-left-width: 1px;
-                border-left-color: darkgray;
-                border-left-style: solid;
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
+                width: 20px;
+                border: none;
+                background: transparent;
             }
             QComboBox::down-arrow {
-                 border: none;
+                /* do not hide native arrow; allow default rendering */
+                width: 12px;
+                height: 12px;
             }
         """
 
@@ -716,20 +714,29 @@ class DatesheetWindow(QWidget):
 
 def generate_pdf(file_name, metadata, schedule, exam_time_range):
     doc = QTextDocument()
-    
-    # HTML content for the PDF, updated to match the reference PDF's style and structure
+
+    # Group exams by date
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for exam in schedule:
+        grouped[exam.get("date", "N/A")].append(exam)
+
+    # Sort dates properly
+    sorted_dates = sorted(grouped.keys(), key=lambda d: d if d == "N/A" else datetime.strptime(d, "%Y-%m-%d"))
+
+    # HTML start
     html = f"""
     <html>
     <head>
         <style>
             body {{
                 font-family: Arial, sans-serif;
-                margin: 0;
+                margin: 20px;
                 padding: 0;
             }}
             .header {{
                 text-align: center;
-                margin-bottom: 20px;
+                margin-bottom: 30px;
             }}
             .header h1 {{
                 font-size: 14pt;
@@ -738,26 +745,32 @@ def generate_pdf(file_name, metadata, schedule, exam_time_range):
             }}
             .header h2 {{
                 font-size: 12pt;
-                font-weight: normal;
-                margin: 5px 0 0;
+                margin: 5px 0;
             }}
             .header p {{
                 font-size: 10pt;
                 margin: 0;
             }}
-            table {{ 
-                width: 100%; 
-                border-collapse: collapse; 
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-bottom: 25px;
             }}
-            th, td {{ 
-                border: 1px solid black; 
-                padding: 8px; 
-                text-align: center; 
+            th, td {{
+                border: 1px solid black;
+                padding: 6px;
+                text-align: center;
                 vertical-align: top;
+                font-size: 10pt;
             }}
-            th {{ 
-                background-color: #f0f0f0; 
+            th {{
+                background-color: #f0f0f0;
                 font-weight: bold;
+            }}
+            .date-title {{
+                font-weight: bold;
+                margin: 10px 0 5px;
+                font-size: 11pt;
             }}
         </style>
     </head>
@@ -768,6 +781,21 @@ def generate_pdf(file_name, metadata, schedule, exam_time_range):
             <p>Effective Date: {metadata['effective_date']}</p>
             <p>Department: {metadata['department_name']}</p>
         </div>
+    """
+
+    # Loop through each exam date and build block tables
+    for date_str in sorted_dates:
+        exams = grouped[date_str]
+
+        # Format Date & Day
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            date_day_str = f"{date_obj.strftime('%d-%m-%Y')}<br>{date_obj.strftime('%A')}"
+        except Exception:
+            date_day_str = f"{date_str}<br>N/A"
+
+        # Table header
+        html += f"""
         <table>
             <thead>
                 <tr>
@@ -780,41 +808,37 @@ def generate_pdf(file_name, metadata, schedule, exam_time_range):
                 </tr>
             </thead>
             <tbody>
-    """
-    
-    # Sort exams by date for correct table order
-    for exam in sorted(schedule, key=lambda x: x.get('date', '')):
-        # Format the 'Date & Day' column
-        try:
-            date_obj = datetime.strptime(exam.get('date', ''), "%Y-%m-%d")
-            date_day_str = f"{date_obj.strftime('%d-%m-%Y')}<br>{date_obj.strftime('%A')}"
-        except ValueError:
-            date_day_str = f"{exam.get('date', '')}<br>N/A"
-
-        # Format the 'Semester/Section' column
-        semester_section_str = f"{exam.get('semester', '')}<br>{exam.get('class_section', '')}"
-
-        # Format the 'Subject (Code)' column
-        subject_code_str = f"{exam.get('subject', '')}<br>- {exam.get('course_code', '')}"
-
-        html += f"""
-            <tr>
-                <td>{date_day_str}</td>
-                <td>{semester_section_str}</td>
-                <td>{subject_code_str}</td>
-                <td>{exam_time_range}</td>
-                <td>{exam.get('room', '')}</td>
-                <td>{exam.get('teacher', '')}</td>
-            </tr>
         """
-    
-    html += """
+
+        # Table rows
+        for exam in exams:
+            semester_section_str = f"{exam.get('semester', '')} {exam.get('class_section', '')}"
+            subject_code_str = f"{exam.get('subject', '')} – {exam.get('course_code', '')}"
+
+            html += f"""
+                <tr>
+                    <td>{date_day_str}</td>
+                    <td>{semester_section_str}</td>
+                    <td>{subject_code_str}</td>
+                    <td>{exam_time_range}</td>
+                    <td>{exam.get('room', '')}</td>
+                    <td>{exam.get('teacher', '')}</td>
+                </tr>
+            """
+
+        # Close table for this date
+        html += """
             </tbody>
         </table>
+        """
+
+    # Close HTML
+    html += """
     </body>
     </html>
     """
-    
+
+    # Render HTML to PDF
     doc.setHtml(html)
     printer = QPrinter()
     printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
