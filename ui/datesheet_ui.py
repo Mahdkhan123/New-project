@@ -69,7 +69,7 @@ class DatesheetWindow(QWidget):
         if self.back_callback:
             home_btn.clicked.connect(self.back_callback)
         # Add "Add Semester" button
-        add_semester_btn = QPushButton("Add Semester and class/section")
+        add_semester_btn = QPushButton("Add Semester")
         add_semester_btn.setStyleSheet(self.get_button_style("#007bff", min_width="150px"))
         add_semester_btn.clicked.connect(self.add_new_semester_dialog)
         header_layout.addWidget(title)
@@ -79,7 +79,7 @@ class DatesheetWindow(QWidget):
         return header
 
     def add_new_semester_dialog(self):
-        name, ok = QInputDialog.getText(self, "New Semester and class/section Frame", "Enter semester and class/section name:")
+        name, ok = QInputDialog.getText(self, "New Semester Frame", "Enter semester:")
         if ok and name.strip():
             self.add_semester_tab(name.strip())
 
@@ -313,46 +313,39 @@ class DatesheetWindow(QWidget):
         )
         include_labs = lab_reply == QMessageBox.StandardButton.Yes
 
-        # 3. Load data from db
-        import sqlite3
-        import os
+        # --- 3. Load data using timetable_db (per-shift DBs) ---
+        import sys, importlib.util
+        db_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "db")
+        timetable_db_path = os.path.join(db_dir, "timetable_db.py")
+        spec = importlib.util.spec_from_file_location("timetable_db", timetable_db_path)
+        timetable_db = importlib.util.module_from_spec(spec)
+        sys.modules["timetable_db"] = timetable_db
+        spec.loader.exec_module(timetable_db)
 
-        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "db", "timetable.db")
-        if not os.path.exists(db_path):
-            QMessageBox.warning(self, "Database Not Found", f"Could not find {db_path}")
-            return
-
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        query = """
-            SELECT 
-                t.shift, t.semester, cs.name as class_section, r.name as room,
-                te.name as teacher_name, c.code as course_code, c.name as course_name, c.indicators
-            FROM timetable t
-            JOIN teachers te ON t.teacher_id = te.id
-            JOIN courses c ON t.course_id = c.id
-            JOIN rooms r ON t.room_id = r.id
-            JOIN class_sections cs ON t.class_section_id = cs.id
-        """
-        where = []
-        params = []
-        if shift != "All":
-            where.append("t.shift = ?")
-            params.append(shift)
-        if not include_labs:
-            where.append("(c.indicators IS NULL OR c.indicators = '')")
-        if where:
-            query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY t.shift, t.semester, cs.name"
-
+        # collect rows from the selected shift(s)
+        shifts_to_load = ["Morning", "Evening"] if shift == "All" else [shift]
+        rows = []
         try:
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            for s in shifts_to_load:
+                entries = timetable_db.load_timetable(s)
+                for e in entries:
+                    indicators = e.get('course_indicators') or ""
+                    # apply lab filter
+                    if not include_labs and indicators.strip():
+                        continue
+                    rows.append((
+                        e.get('shift'),
+                        e.get('semester'),
+                        e.get('class_section_name'),
+                        e.get('room_name'),
+                        e.get('teacher_name'),
+                        e.get('course_code'),
+                        e.get('course_name'),
+                        indicators
+                    ))
         except Exception as e:
             QMessageBox.critical(self, "DB Error", str(e))
-            conn.close()
             return
-        conn.close()
 
         # 4. Organize by (shift, semester, class_section)
         tabs_data = {}  # key: (shift, semester, class_section), value: list of rows
@@ -375,7 +368,7 @@ class DatesheetWindow(QWidget):
         # 5. Clear all tabs
         self.tab_widget.clear()
 
-        # 6. Create tabs and fill tables
+        # 6. Create tabs and fill tables (unchanged)
         for (shift_val, semester, class_section), entries in tabs_data.items():
             tab_name = f"{semester} - {class_section} ({shift_val})"
             self.add_semester_tab(tab_name)

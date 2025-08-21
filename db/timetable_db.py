@@ -2,15 +2,19 @@ import tkinter.messagebox as messagebox
 import sqlite3
 import os
 
+# Ensure working directory is DB folder
 os.chdir(os.path.dirname(__file__))
-db_path = os.path.join(os.path.dirname(__file__), 'timetable.db')
-conn = sqlite3.connect(db_path, check_same_thread=False)
-conn.execute('PRAGMA foreign_keys = ON')
 
-def init_timetable_db():
-    c = conn.cursor()
-    
-    # Create the timetable table
+# New: use separate DB files per shift
+_DB_FILES = {
+    "Morning": os.path.join(os.path.dirname(__file__), 'timetable_morning.db'),
+    "Evening": os.path.join(os.path.dirname(__file__), 'timetable_evening.db')
+}
+_conns = {}
+
+# Move/create table helper before connection creation so it can be invoked immediately
+def _create_tables_on_conn(conn_local):
+    c = conn_local.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS timetable (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,7 +22,7 @@ def init_timetable_db():
             course_id INTEGER NOT NULL,
             room_id INTEGER NOT NULL,
             class_section_id INTEGER NOT NULL,
-            semester TEXT NOT NULL,  -- Changed to TEXT
+            semester TEXT NOT NULL,
             shift TEXT NOT NULL,
             FOREIGN KEY (teacher_id) REFERENCES teachers (id),
             FOREIGN KEY (course_id) REFERENCES courses (id),
@@ -26,16 +30,12 @@ def init_timetable_db():
             FOREIGN KEY (class_section_id) REFERENCES class_sections (id)
         )
     ''')
-    
-    # Create the teachers table (no change)
     c.execute('''
         CREATE TABLE IF NOT EXISTS teachers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE
         )
     ''')
-    
-    # Create the courses table (no change regarding semester here)
     c.execute('''
         CREATE TABLE IF NOT EXISTS courses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,31 +47,54 @@ def init_timetable_db():
             UNIQUE(name, code, teacher_id)
         )
     ''')
-    
-    # Create the rooms table (no change)
     c.execute('''
         CREATE TABLE IF NOT EXISTS rooms (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name INTEGER NOT NULL UNIQUE 
         )
     ''')
-    
-    # Create the class_sections table
     c.execute('''
         CREATE TABLE IF NOT EXISTS class_sections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            semester TEXT NOT NULL, -- Changed to TEXT
+            semester TEXT NOT NULL,
             shift TEXT NOT NULL,
             UNIQUE(name, semester, shift)   
         )
     ''')
+    conn_local.commit()
+
+def _ensure_conn(shift):
+    if shift not in _DB_FILES:
+        shift = "Morning"
+    if shift not in _conns:
+        path = _DB_FILES[shift]
+        conn_local = sqlite3.connect(path, check_same_thread=False)
+        conn_local.execute('PRAGMA foreign_keys = ON')
+        # Ensure schema exists immediately for this DB
+        _create_tables_on_conn(conn_local)
+        _conns[shift] = conn_local
+    return _conns[shift]
+
+# Backwards-compatible default conn (Morning)
+conn = _ensure_conn("Morning")
+
+def get_conn_for_shift(shift):
+    """
+    Returns the database connection for the given shift.
+    Defaults to 'Morning' if shift is not recognized.
+    """
+    return _ensure_conn(shift)
 
 def fetch_id_from_name(table, name, **kwargs):
-    cur = conn.cursor()
+    cur = None
     try:
+        # determine shift for operations that require a specific DB
+        shift = kwargs.get("shift", "Morning")
+        conn_local = get_conn_for_shift(shift)
+        cur = conn_local.cursor()
+
         if table == "rooms":
-            # ... (no change from previous version for rooms)
             try:
                 room_name_val = int(name)
                 if room_name_val <= 0:
@@ -82,11 +105,9 @@ def fetch_id_from_name(table, name, **kwargs):
                 messagebox.showerror("Invalid Room", "Room must be a positive integer.")
                 return None
         elif table == "teachers":
-            # ... (no change for teachers)
             query = "SELECT id FROM teachers WHERE name = ?"
             params = (name,)
         elif table == "courses":
-            # ... (no change for courses from previous version)
             teacher_id = kwargs.get("teacher_id")
             code = kwargs.get("code")
             indicators = kwargs.get("indicators", "") 
@@ -96,13 +117,13 @@ def fetch_id_from_name(table, name, **kwargs):
             query = "SELECT id FROM courses WHERE name = ? AND teacher_id = ? AND code = ?"
             params = (name, teacher_id, code)
         elif table == "class_sections":
-            semester_text = kwargs.get("semester") # Semester is now TEXT
-            shift = kwargs.get("shift")
-            if not semester_text or not shift: # semester_text can be any string now
+            semester_text = kwargs.get("semester")
+            shift_text = kwargs.get("shift", shift)
+            if semester_text is None or not shift_text:
                 messagebox.showerror("Missing Data", "Semester (as text) and Shift are required for class sections.")
                 return None
             query = "SELECT id FROM class_sections WHERE name = ? AND semester = ? AND shift = ?"
-            params = (name, semester_text, shift)
+            params = (name, semester_text, shift_text)
         else:
             messagebox.showerror("Error", f"Unknown table: {table}")
             return None
@@ -113,7 +134,7 @@ def fetch_id_from_name(table, name, **kwargs):
         if result:
             return result[0]
         else:
-            # Insert the record
+            # Insert the record into the DB for the given shift (conn_local)
             if table == "teachers":
                 cur.execute("INSERT INTO teachers (name) VALUES (?)", (name,))
             elif table == "courses":
@@ -123,9 +144,9 @@ def fetch_id_from_name(table, name, **kwargs):
                 cur.execute("INSERT INTO rooms (name) VALUES (?)", (int(name),))
             elif table == "class_sections":
                 cur.execute("INSERT INTO class_sections (name, semester, shift) VALUES (?, ?, ?)", 
-                            (name, semester_text, shift)) # Use semester_text
+                            (name, semester_text, shift_text))
             
-            conn.commit()
+            conn_local.commit()
             return cur.lastrowid
 
     except sqlite3.Error as e:
@@ -135,13 +156,8 @@ def fetch_id_from_name(table, name, **kwargs):
         messagebox.showerror("Error", f"An unexpected error occurred in fetch_id_from_name for {table} '{name}': {e}")
         return None
 
-def load_timetable(shift, semester_label=None): # Primary filter is shift, semester_label is optional text filter
-    """
-    Load timetable entries from the database.
-    Primary filter: shift.
-    Optional secondary filter: semester_label (exact string match).
-    """
-    cur = conn.cursor()
+def load_timetable(shift, semester_label=None):
+    cur = get_conn_for_shift(shift).cursor()
     
     query = '''
         SELECT 
@@ -156,7 +172,7 @@ def load_timetable(shift, semester_label=None): # Primary filter is shift, semes
             rooms.name AS room_name, 
             t.class_section_id,
             class_sections.name AS class_section_name, 
-            t.semester,  -- This is the TEXT semester label
+            t.semester,
             t.shift
         FROM timetable t
         JOIN teachers ON t.teacher_id = teachers.id
@@ -167,7 +183,7 @@ def load_timetable(shift, semester_label=None): # Primary filter is shift, semes
     '''
     params_list = [shift]
     
-    if semester_label: # If a specific semester label is provided for further filtering
+    if semester_label:
         query += ' AND t.semester = ?'
         params_list.append(semester_label)
     
@@ -183,16 +199,12 @@ def load_timetable(shift, semester_label=None): # Primary filter is shift, semes
     
     return [dict(zip(columns, row)) for row in cur.fetchall()]
 
-def load_timetable_for_ga(shift): # Only takes shift as primary criteria
-    """
-    Load all necessary data for the GA, filtered ONLY by shift.
-    Semester is just a descriptive attribute of the loaded entries.
-    """
-    cur = conn.cursor()
+def load_timetable_for_ga(shift):
+    cur = get_conn_for_shift(shift).cursor()
     query = """
         SELECT 
             tt.teacher_id, tt.course_id, tt.room_id, tt.class_section_id, 
-            tt.semester, -- Text semester label
+            tt.semester,
             tt.shift,
             c.name as course_name, c.code as course_code, c.indicators as course_indicators,
             r.name as room_name,
@@ -205,7 +217,6 @@ def load_timetable_for_ga(shift): # Only takes shift as primary criteria
         JOIN class_sections cs ON tt.class_section_id = cs.id
         WHERE tt.shift = ? 
     """
-    # Removed semester from WHERE clause for GA data loading
     params = [shift]
     
     cur.execute(query, tuple(params))
@@ -220,19 +231,54 @@ def load_timetable_for_ga(shift): # Only takes shift as primary criteria
     print(f"Loaded {len(results)} entries for GA for shift: {shift}")
     return results
 
-def delete_timetable_entry_from_db(entry_id):
-    """
-    Delete a timetable entry from the database by its ID.
-    Returns True if successful, False otherwise.
-    """
+def delete_timetable_entry_from_db(entry_id, shift=None):
     try:
-        cur = conn.cursor()
+        conn_local = get_conn_for_shift(shift or "Morning")
+        cur = conn_local.cursor()
         cur.execute("DELETE FROM timetable WHERE id = ?", (entry_id,))
-        conn.commit()
+        conn_local.commit()
         return cur.rowcount > 0
     except sqlite3.Error as e:
         messagebox.showerror("Database Error", f"Failed to delete entry from database: {e}")
         return False
 
+def get_all_class_sections():
+    """
+    Return combined list of (semester, name, shift) from both DBs.
+    """
+    combined = []
+    for s in _DB_FILES.keys():
+        cur = get_conn_for_shift(s).cursor()
+        cur.execute("SELECT DISTINCT semester, name, shift FROM class_sections")
+        combined.extend(cur.fetchall())
+    return combined
+
+def get_all_course_entries():
+    """
+    Return combined list of (semester, class_section_name, shift, code, course_name)
+    joined from timetable->courses->class_sections across both DBs.
+    """
+    combined = []
+    query = ("SELECT cs.semester, cs.name, cs.shift, c.code, c.name FROM courses c "
+             "JOIN timetable t ON t.course_id = c.id "
+             "JOIN class_sections cs ON t.class_section_id = cs.id")
+    for s in _DB_FILES.keys():
+        cur = get_conn_for_shift(s).cursor()
+        try:
+            cur.execute(query)
+            combined.extend(cur.fetchall())
+        except Exception:
+            # ignore empty or missing joins
+            pass
+    return combined
+
 def close_db():
-    conn.close()
+    for c in list(_conns.values()):
+        try:
+            c.close()
+        except:
+            pass
+    _conns.clear()
+    # reset default
+    global conn
+    conn = _ensure_conn("Morning")

@@ -73,7 +73,7 @@ class TimetableWindow(QWidget):
         if self.back_callback:
             home_btn.clicked.connect(self.back_callback)
         # Add "Add Semester" button
-        add_semester_btn = QPushButton("Add Semester and class/section")
+        add_semester_btn = QPushButton("Add Semester")
         add_semester_btn.setStyleSheet(self.get_button_style("#007bff", min_width="150px"))
         add_semester_btn.clicked.connect(self.add_new_semester_dialog)
         header_layout.addWidget(title)
@@ -83,7 +83,7 @@ class TimetableWindow(QWidget):
         return header
 
     def add_new_semester_dialog(self):
-        name, ok = QInputDialog.getText(self, "New Semester and class/section Frame", "Enter semester and class/section name:")
+        name, ok = QInputDialog.getText(self, "New Semester Frame", "Enter semester:")
         if ok and name.strip():
             self.add_semester_tab(name.strip())
 
@@ -118,19 +118,22 @@ class TimetableWindow(QWidget):
         table.setColumnWidth(0, 50)
         table.setColumnWidth(1, 40)
 
+        # store canonical semester for this tab (used for all rows in this frame)
+        table_frame.semester_name = semester_name
+
         def add_row():
             row_position = table.rowCount()
             table.insertRow(row_position)
 
-            # --- Copy data from previous row if exists ---
+            # --- Copy data from previous row if exists (except semester; semester is fixed per frame) ---
             prev_data = {}
             if row_position > 0:
                 # Shift (QComboBox)
                 prev_shift = table.cellWidget(row_position - 1, 2)
                 if prev_shift:
                     prev_data['shift'] = prev_shift.currentText()
-                # Semester, Class/Section, Room (QTableWidgetItem)
-                for col, key in zip([3, 4, 5], ['semester', 'class_section', 'room']):
+                # Class/Section, Room (QTableWidgetItem) - do not copy semester from previous row
+                for col, key in zip([4, 5], ['class_section', 'room']):
                     prev_item = table.item(row_position - 1, col)
                     if prev_item:
                         prev_data[key] = prev_item.text()
@@ -155,8 +158,13 @@ class TimetableWindow(QWidget):
             shift_combo.setCurrentText(prev_data.get('shift', "Select Shift"))
             table.setCellWidget(row_position, 2, shift_combo)
 
+            # Semester: always set to this tab's semester_name and make read-only
+            sem_item = QTableWidgetItem(table_frame.semester_name)
+            sem_item.setFlags(sem_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            sem_item.setForeground(Qt.GlobalColor.black)
+            table.setItem(row_position, 3, sem_item)
+
             placeholders = {
-                3: "Semester",
                 4: "Class/Section",
                 5: "Room",
                 6: "Teacher Name",
@@ -164,17 +172,15 @@ class TimetableWindow(QWidget):
                 8: "Course Name",
                 9: "Lab"
             }
-            for col in range(3, table.columnCount()):
-                if col == 3:
-                    text = prev_data.get('semester', placeholders[col])
-                elif col == 4:
+            for col in range(4, table.columnCount()):
+                if col == 4:
                     text = prev_data.get('class_section', placeholders[col])
                 elif col == 5:
                     text = prev_data.get('room', placeholders[col])
                 else:
                     text = placeholders.get(col, "")
                 item = QTableWidgetItem(text)
-                if col in [3, 4, 5] and text != placeholders[col]:
+                if col in [4, 5] and text != placeholders[col]:
                     item.setForeground(Qt.GlobalColor.black)
                 else:
                     item.setForeground(Qt.GlobalColor.gray)
@@ -382,16 +388,14 @@ class TimetableWindow(QWidget):
         # --- Class Section/Semester Dropdown (from DB) ---
         layout.addWidget(QLabel("Class Section/Semester:"))
         class_section_combo = QComboBox()
-        # Fetch from DB
+        # Fetch from DB (now uses helper to collect from both DBs)
         db_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "db")
         timetable_db_path = os.path.join(db_dir, "timetable_db.py")
         spec = importlib.util.spec_from_file_location("timetable_db", timetable_db_path)
         timetable_db = importlib.util.module_from_spec(spec)
         sys.modules["timetable_db"] = timetable_db
         spec.loader.exec_module(timetable_db)
-        cur = timetable_db.conn.cursor()
-        cur.execute("SELECT DISTINCT semester, name, shift FROM class_sections")
-        class_section_list = cur.fetchall()
+        class_section_list = timetable_db.get_all_class_sections()
         def get_class_section_options_for_shift(shift):
             return [f"{sem} - {name} - {sh}" for sem, name, sh in class_section_list if sh == shift]
         class_section_combo.addItems(get_class_section_options_for_shift(shift_combo.currentText()))
@@ -413,11 +417,8 @@ class TimetableWindow(QWidget):
         exceptions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         remove_exception_btn = QPushButton("Remove Selected Exception")
 
-        # Fetch all courses for all class sections
-        cur.execute("SELECT cs.semester, cs.name, cs.shift, c.code, c.name FROM courses c "
-                    "JOIN timetable t ON t.course_id = c.id "
-                    "JOIN class_sections cs ON t.class_section_id = cs.id")
-        all_courses = cur.fetchall()
+        # Fetch all courses for all class sections across both DBs
+        all_courses = timetable_db.get_all_course_entries()
 
         def update_course_combo():
             # Get selected class section/semester/shift
@@ -609,15 +610,17 @@ class TimetableWindow(QWidget):
         spec.loader.exec_module(timetable_db)
 
         try:
-            cur = timetable_db.conn.cursor()
-            # Delete all data from all tables (order matters due to foreign keys)
-            cur.execute("DELETE FROM timetable")
-            cur.execute("DELETE FROM courses")
-            cur.execute("DELETE FROM teachers")
-            cur.execute("DELETE FROM rooms")
-            cur.execute("DELETE FROM class_sections")
-            timetable_db.conn.commit()
-            QMessageBox.information(self, "Success", "All data has been erased from the database.")
+            # Delete all data from both DBs separately
+            for s in ["Morning", "Evening"]:
+                conn_local = timetable_db.get_conn_for_shift(s)
+                cur = conn_local.cursor()
+                cur.execute("DELETE FROM timetable")
+                cur.execute("DELETE FROM courses")
+                cur.execute("DELETE FROM teachers")
+                cur.execute("DELETE FROM rooms")
+                cur.execute("DELETE FROM class_sections")
+                conn_local.commit()
+            QMessageBox.information(self, "Success", "All data has been erased from both databases.")
             # Optionally clear all tabs in the UI
             self.tab_widget.clear()
         except Exception as e:
@@ -637,11 +640,52 @@ class TimetableWindow(QWidget):
         sys.modules["timetable_db"] = timetable_db
         spec.loader.exec_module(timetable_db)
 
-        # --- Remove all timetable entries before saving new ones ---
+        # --- Validation: each semester tab must have a (non-empty) room and rooms must be unique across tabs ---
+        tab_rooms = {}  # tab_index -> room_value
+        missing_rooms = []
+        room_to_tabs = {}
+        for tab_index in range(self.tab_widget.count()):
+            tab_widget = self.tab_widget.widget(tab_index)
+            if not hasattr(tab_widget, "table"):
+                continue
+            table = tab_widget.table
+            room_value = None
+            # find first non-empty room cell in this tab
+            for row in range(table.rowCount()):
+                item = table.item(row, 5)  # Room column
+                if item and item.text().strip():
+                    room_value = item.text().strip()
+                    break
+            if not room_value:
+                missing_rooms.append(tab_index)
+            else:
+                tab_rooms[tab_index] = room_value
+                room_to_tabs.setdefault(room_value, []).append(tab_index)
+
+        # If any tab missing a room, warn and abort
+        if missing_rooms:
+            QMessageBox.warning(self, "Missing Room", "One or more semester frames do not have a room assigned. Please assign a room for each semester frame before saving.")
+            return
+
+        # If any duplicate rooms across tabs, warn and abort
+        duplicates = {r: tabs for r, tabs in room_to_tabs.items() if len(tabs) > 1}
+        if duplicates:
+            dup_rooms = ", ".join(duplicates.keys())
+            QMessageBox.warning(
+                self,
+                "Duplicate Rooms",
+                f"Each semester frame must use a different room. The following room(s) are assigned to more than one semester frame: {dup_rooms}\n\nPlease assign unique room numbers to each semester frame before saving."
+            )
+            return
+        # --- End validation ---
+
+        # --- Clear old timetable entries in BOTH DBs before saving new ones ---
         try:
-            cur = timetable_db.conn.cursor()
-            cur.execute("DELETE FROM timetable")
-            timetable_db.conn.commit()
+            for s in ["Morning", "Evening"]:
+                conn_local = timetable_db.get_conn_for_shift(s)
+                cur = conn_local.cursor()
+                cur.execute("DELETE FROM timetable")
+                conn_local.commit()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to clear old timetable entries:\n{e}")
             return
@@ -655,7 +699,7 @@ class TimetableWindow(QWidget):
             table = tab_widget.table
             for row in range(table.rowCount()):
                 shift_combo = table.cellWidget(row, 2)
-                shift = shift_combo.currentText() if shift_combo else ""
+                shift = shift_combo.currentText() if shift_combo else "Morning"
                 semester = table.item(row, 3).text() if table.item(row, 3) else ""
                 class_section = table.item(row, 4).text() if table.item(row, 4) else ""
                 room = table.item(row, 5).text() if table.item(row, 5) else ""
@@ -664,37 +708,40 @@ class TimetableWindow(QWidget):
                 course_name = table.item(row, 8).text() if table.item(row, 8) else ""
                 indicators = table.item(row, 9).text() if table.item(row, 9) else ""
 
-                # Use timetable_db helper to get or create IDs
-                teacher_id = timetable_db.fetch_id_from_name("teachers", teacher)
+                # Use timetable_db helper to get or create IDs in the correct DB for the shift
+                conn_local = timetable_db.get_conn_for_shift(shift)
+                cur = conn_local.cursor()
+
+                teacher_id = timetable_db.fetch_id_from_name("teachers", teacher, shift=shift)
                 if not teacher_id:
                     continue
-                course_id = timetable_db.fetch_id_from_name("courses", course_name, teacher_id=teacher_id, code=course_code, indicators=indicators)
+                course_id = timetable_db.fetch_id_from_name("courses", course_name, teacher_id=teacher_id, code=course_code, indicators=indicators, shift=shift)
                 if not course_id:
                     continue
-                # --- Update indicators (Lab) if course already exists ---
+                # Update indicators if needed
                 try:
                     cur.execute(
                         "UPDATE courses SET indicators = ? WHERE id = ?",
                         (indicators, course_id)
                     )
-                    timetable_db.conn.commit()
+                    conn_local.commit()
                 except Exception:
                     pass
-                # --- End update indicators ---
-                room_id = timetable_db.fetch_id_from_name("rooms", room)
+
+                room_id = timetable_db.fetch_id_from_name("rooms", room, shift=shift)
                 if not room_id:
                     continue
                 class_section_id = timetable_db.fetch_id_from_name("class_sections", class_section, semester=semester, shift=shift)
                 if not class_section_id:
                     continue
 
-                # Insert into timetable table
+                # Insert into timetable table in the DB for this shift
                 try:
                     cur.execute(
                         "INSERT INTO timetable (teacher_id, course_id, room_id, class_section_id, semester, shift) VALUES (?, ?, ?, ?, ?, ?)",
                         (teacher_id, course_id, room_id, class_section_id, semester, shift)
                     )
-                    timetable_db.conn.commit()
+                    conn_local.commit()
                     total_saved += 1
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to save entry on tab {tab_index+1}, row {row+1}:\n{e}")
@@ -703,7 +750,7 @@ class TimetableWindow(QWidget):
         if total_saved == 0:
             QMessageBox.warning(self, "No Data", "There are no entries to save.")
         else:
-            QMessageBox.information(self, "Success", f"All entries from all semesters saved to the database (previous entries replaced).")
+            QMessageBox.information(self, "Success", f"All entries from all semesters saved to their respective databases (previous entries replaced).")
 
     def load_from_db(self):
         import sys
@@ -761,8 +808,12 @@ class TimetableWindow(QWidget):
 
         # For each group, create a tab and fill the table
         for (semester, class_section, shift), entries in grouped.items():
-            tab_name = f"{semester} - {class_section} ({shift})"
-            self.add_semester_tab(tab_name)
+            tab_label = f"{semester} - {class_section} ({shift})"
+            # create tab with canonical semester (so internal semester_name is correct)
+            self.add_semester_tab(semester)
+            # rename visible tab label to include section and shift for clarity
+            current_idx = self.tab_widget.currentIndex()
+            self.tab_widget.setTabText(current_idx, tab_label)
             table = self.get_current_table()
             for entry in entries:
                 row_position = table.rowCount()
@@ -790,8 +841,10 @@ class TimetableWindow(QWidget):
                 shift_combo.setCurrentText(entry['shift'])
                 table.setCellWidget(row_position, 2, shift_combo)
 
-                # Semester
-                semester_item = QTableWidgetItem(entry['semester'])
+                # Semester (ensure internal semester_name remains canonical for this tab)
+                semester_item = QTableWidgetItem(table.parent().semester_name if hasattr(table.parent(), 'semester_name') else entry['semester'])
+                # make loaded semester entry read-only to match tab canonical semester
+                semester_item.setFlags(semester_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 semester_item.setForeground(Qt.GlobalColor.black)
                 table.setItem(row_position, 3, semester_item)
 
@@ -831,6 +884,7 @@ class TimetableWindow(QWidget):
         import sys
         import os
         import importlib.util
+        from collections import defaultdict
 
         table = self.get_current_table()
         if not table:
@@ -845,7 +899,6 @@ class TimetableWindow(QWidget):
                 checkbox = cell_widget.findChild(QCheckBox)
                 if checkbox and checkbox.isChecked():
                     rows_to_delete.append(row)
-                    # Collect entry data for database deletion
                     entry = {
                         'shift': table.cellWidget(row, 2).currentText(),
                         'semester': table.item(row, 3).text(),
@@ -861,7 +914,6 @@ class TimetableWindow(QWidget):
             QMessageBox.information(self, "No Selection", "Please select entries to delete.")
             return
 
-        # Ask user about deletion scope
         reply = QMessageBox.question(
             self,
             "Delete Confirmation",
@@ -877,52 +929,56 @@ class TimetableWindow(QWidget):
         if reply == QMessageBox.StandardButton.Cancel:
             return
 
-        # Delete from database if user chose Yes
+        # Dynamically import timetable_db for DB deletes
+        db_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "db")
+        timetable_db_path = os.path.join(db_dir, "timetable_db.py")
+        spec = importlib.util.spec_from_file_location("timetable_db", timetable_db_path)
+        timetable_db = importlib.util.module_from_spec(spec)
+        sys.modules["timetable_db"] = timetable_db
+        spec.loader.exec_module(timetable_db)
+
+        # Delete from database if user chose Yes (group by shift)
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                # Dynamically import timetable_db
-                db_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "db")
-                timetable_db_path = os.path.join(db_dir, "timetable_db.py")
-                spec = importlib.util.spec_from_file_location("timetable_db", timetable_db_path)
-                timetable_db = importlib.util.module_from_spec(spec)
-                sys.modules["timetable_db"] = timetable_db
-                spec.loader.exec_module(timetable_db)
-
-                cur = timetable_db.conn.cursor()
-                for entry in entries_to_delete:
-                    # Find and delete the matching timetable entry
-                    cur.execute("""
-                        DELETE FROM timetable 
-                        WHERE class_section_id IN (
-                            SELECT cs.id 
-                            FROM class_sections cs 
-                            WHERE cs.name = ? AND cs.semester = ? AND cs.shift = ?
-                        )
-                        AND room_id IN (
-                            SELECT r.id 
-                            FROM rooms r 
-                            WHERE r.name = ?
-                        )
-                        AND teacher_id IN (
-                            SELECT t.id 
-                            FROM teachers t 
-                            WHERE t.name = ?
-                        )
-                        AND course_id IN (
-                            SELECT c.id 
-                            FROM courses c 
-                            WHERE c.code = ? AND c.name = ?
-                        )
-                    """, (
-                        entry['class_section'],
-                        entry['semester'],
-                        entry['shift'],
-                        entry['room'],
-                        entry['teacher'],
-                        entry['course_code'],
-                        entry['course_name']
-                    ))
-                timetable_db.conn.commit()
+                grouped = defaultdict(list)
+                for ent in entries_to_delete:
+                    grouped[ent['shift']].append(ent)
+                for s, ents in grouped.items():
+                    conn_local = timetable_db.get_conn_for_shift(s)
+                    cur = conn_local.cursor()
+                    for entry in ents:
+                        cur.execute("""
+                            DELETE FROM timetable 
+                            WHERE class_section_id IN (
+                                SELECT cs.id 
+                                FROM class_sections cs 
+                                WHERE cs.name = ? AND cs.semester = ? AND cs.shift = ?
+                            )
+                            AND room_id IN (
+                                SELECT r.id 
+                                FROM rooms r 
+                                WHERE r.name = ?
+                            )
+                            AND teacher_id IN (
+                                SELECT t.id 
+                                FROM teachers t 
+                                WHERE t.name = ?
+                            )
+                            AND course_id IN (
+                                SELECT c.id 
+                                FROM courses c 
+                                WHERE c.code = ? AND c.name = ?
+                            )
+                        """, (
+                            entry['class_section'],
+                            entry['semester'],
+                            entry['shift'],
+                            entry['room'],
+                            entry['teacher'],
+                            entry['course_code'],
+                            entry['course_name']
+                        ))
+                    conn_local.commit()
                 QMessageBox.information(self, "Success", "Selected entries deleted from database.")
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Failed to delete from database: {e}")
